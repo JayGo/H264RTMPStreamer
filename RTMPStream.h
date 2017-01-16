@@ -11,6 +11,11 @@ purpose:    发送H264视频到RTMP Server，使用libRtmp库
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <vector>
+#include <string>
+#include <sstream>
+#include <sys/time.h>
+
 using namespace std;
 
 #define FILEBUFSIZE (1024 * 1024 * 100)       //  10M
@@ -43,6 +48,12 @@ typedef struct _RTMPMetadata
 	char		    pAudioSpecCfg;
 	unsigned int	nAudioSpecCfgLen;
 
+public:
+	_RTMPMetadata() {
+		nSpsLen = 0;
+		nPpsLen = 0;
+	}
+
 } RTMPMetadata,*LPRTMPMetadata;
 
 
@@ -65,23 +76,33 @@ public:
 	// send H264 data frames
 	bool SendH264Frames(const char *pFrameDataDir);
 
-private:
-	// 送缓存中读取一个NALU包
-	bool ReadOneNaluFromBuf(NaluUnit &nalu);
+	bool sendFirstFrame(unsigned char* data, int length);
+	bool sendNormalFrame(unsigned char* data, int length);
+	void releaseNalus(vector<NaluUnit*> nalusUnits);
+
 	// 发送数据
 	int SendPacket(unsigned int nPacketType,unsigned char *data,unsigned int size,unsigned int nTimestamp);
 	// get H264 frames number
 	int getFramesSum(const char *pFrameDataDir);
 	// process first frame, get sps, psp, sei, idr
-	vector<NaluUnit*> processFirstFrame(unsigned char *data, const unsigned int length);
+	vector<NaluUnit*> processFirstFrame(unsigned char *data, unsigned int length);
 	// get frame data from file
 	int getFrameData(string fileName, unsigned char *frameBuffer, unsigned int frameBufferSize);
 	// process frames excluding first frame
-	NaluUnit processNormalFrame(unsigned char *data, const unsigned int length);
+	vector<NaluUnit*> processNormalFrame(unsigned char *data, unsigned int length);
+
+	void handleNalus(vector<NaluUnit*> nalus);
+
+private:
+	long getCurrentTime();
+	unsigned int getTick();
 
 private:
 	RTMP* m_pRtmp;
 	unsigned char* m_pFileBuf;
 	unsigned int  m_nFileBufSize;
 	unsigned int  m_nCurPos;
+	unsigned int tick;
+	unsigned int frameRate;
+	long lastTime;
 };

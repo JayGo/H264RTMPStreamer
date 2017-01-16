@@ -39,6 +39,8 @@ inline void CleanupSockets() {
 #endif
 }
 
+
+
 char * put_byte(char *output, uint8_t nVal) {
 	output[0] = nVal;
 	return output + 1;
@@ -91,7 +93,7 @@ char * put_amf_double(char *c, double d) {
 }
 
 CRTMPStream::CRTMPStream(void) :
-		m_pRtmp(NULL), m_nFileBufSize(0), m_nCurPos(0) {
+		m_pRtmp(NULL), m_nFileBufSize(0), m_nCurPos(0), tick(0), frameRate(40), lastTime(-1) {
 	m_pFileBuf = new unsigned char[FILEBUFSIZE];
 	memset(m_pFileBuf, 0, FILEBUFSIZE);
 	InitSockets();
@@ -105,6 +107,12 @@ CRTMPStream::~CRTMPStream(void) {
 	WSACleanup();
 #endif
 	delete[] m_pFileBuf;
+}
+
+long CRTMPStream::getCurrentTime() {
+   struct timeval tv;
+   gettimeofday(&tv,NULL);
+   return tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
 
 bool CRTMPStream::Connect(const char* url) {
@@ -325,8 +333,25 @@ int CRTMPStream::getFrameData(string fileName, unsigned char *frameBuffer,
 	return readFrameSize;
 }
 
-vector<NaluUnit*> CRTMPStream::processFirstFrame(unsigned char* data,
-		const unsigned int length) {
+void CRTMPStream::releaseNalus(vector<NaluUnit*> nalusUnits) {
+	for(int i=0;i<nalusUnits.size();i++) {
+		delete nalusUnits[i];
+	}
+}
+
+bool CRTMPStream::sendFirstFrame(unsigned char* data, int length) {
+	vector<NaluUnit*> naluUnits = processFirstFrame(data, length);
+	handleNalus(naluUnits);
+	return true;
+}
+
+bool CRTMPStream::sendNormalFrame(unsigned char* data, int length) {
+	vector<NaluUnit*> naluUnits = processNormalFrame(data, length);
+	handleNalus(naluUnits);
+	return true;
+}
+
+vector<NaluUnit*> CRTMPStream::processFirstFrame(unsigned char* data, unsigned int length) {
 	int i = 0;
 
 	bool isFoundStartCode = false;
@@ -364,7 +389,12 @@ vector<NaluUnit*> CRTMPStream::processFirstFrame(unsigned char* data,
 		unsigned char nal = data[nalIndex];
 
 		NaluUnit *naluUnit = new NaluUnit();
-		naluUnit->size = divides[j+1] - nalIndex;
+		if(j<divides.size()-2) {
+			naluUnit->size = divides[j+1] - nalIndex;
+		} else {
+			naluUnit->size = divides[j+1] - nalIndex + 1;
+		}
+
 		naluUnit->type = nal & 0x1f;
 		naluUnit->data = &data[divides[j] + dividesLengths[j]];
 
@@ -373,13 +403,15 @@ vector<NaluUnit*> CRTMPStream::processFirstFrame(unsigned char* data,
 	return results;
 }
 
-NaluUnit processNormalFrame(unsigned char *data, const unsigned int length) {
-	NaluUnit naluUnit;
+vector<NaluUnit*> CRTMPStream::processNormalFrame(unsigned char *data, unsigned int length) {
+	vector<NaluUnit*> results;
+	NaluUnit *naluUnit = new NaluUnit();
+
 	int i = 0;
 	int startLength = 0;
 
 	if(i+1 >= length || i+2 >= length || i+3 >= length) {
-		return NULL;
+		return results;
 	}
 
 	if(data[i] == 0x00 && data[i+1] == 0x00 && data[i+2] == 0x01) {
@@ -390,192 +422,126 @@ NaluUnit processNormalFrame(unsigned char *data, const unsigned int length) {
 		startLength = 4;
 	}
 
-	naluUnit.size = length - startLength;
-	naluUnit.type = data[startLength] & 0x1f;
-	naluUnit.data = &data[startLength];
+	naluUnit->size = length - startLength;
+	naluUnit->type = data[startLength] & 0x1f;
+	naluUnit->data = &data[startLength];
+
+
+	results.push_back(naluUnit);
+	return results;
+}
+
+void CRTMPStream::handleNalus(vector<NaluUnit*> nalus) {
+	int naluNr = 0;
+	RTMPMetadata metaData;
+
+	for(int j=0;j<nalus.size();j++) {
+		switch(nalus[j]->type) {
+		// SPS
+		case 0x07: {
+			metaData.nSpsLen = nalus[j]->size;
+			memcpy(metaData.Sps, nalus[j]->data, nalus[j]->size);
+
+			int width = 0, height = 0;
+			h264_decode_sps(metaData.Sps, metaData.nSpsLen, width, height);
+			metaData.nWidth = width;
+			metaData.nHeight = height;
+			metaData.nFrameRate = frameRate;
+
+			break;
+		}
+
+		// PPS
+		case 0x08: {
+			metaData.nPpsLen = nalus[j]->size;
+			memcpy(metaData.Pps, nalus[j]->data, nalus[j]->size);
+			break;
+		}
+
+		// SEI
+		case 0x06: {
+			tick += getTick();	//40是由帧数决定的,25帧情况下:tick=1s/25=0.04s=40ms
+			SendH264Packet(nalus[j]->data, nalus[j]->size, false, tick);
+			// msleep(frameRate);
+			break;
+		}
+
+		// IDR
+		case 0x05: {
+			tick += getTick();
+			SendH264Packet(nalus[j]->data, nalus[j]->size, true, tick);
+			break;
+		}
+
+		// Not IDR
+		case 0x01: {
+			tick += getTick();
+			SendH264Packet(nalus[j]->data, nalus[j]->size, false, tick);
+			// printf("Sending %d frame...\n", naluNr++);
+			break;
+		}
+
+		default: {
+			printf("error: unknow frame type: %x\n", nalus[j]->type);
+		}
+		}
+
+		if(j==1 && metaData.nSpsLen > 0 && metaData.nPpsLen > 0) {
+			printf("Sending meta data...\n");
+			// 发送MetaData
+			SendMetadata(&metaData);
+		}
+	}
+	releaseNalus(nalus);
+}
+
+unsigned int CRTMPStream::getTick() {
+	long currentTime = getCurrentTime();
+	long lastTimetTemp = lastTime;
+	lastTime = currentTime;
+	return (lastTimetTemp > 0)?(currentTime-lastTimetTemp):0;
+}
+
+bool CRTMPStream::SendH264File(const char* pFileName) {
+	unsigned int frameBufferSize = 4 * 1024 * 1024;
+	unsigned char* frameBuffer = new unsigned char[frameBufferSize]();
+	int readFrameSize = -1;
+	string fileName = pFileName;
+
+	if ((readFrameSize = getFrameData(fileName, frameBuffer, frameBufferSize)) > 0) {
+		vector<NaluUnit*> naluUnits = processFirstFrame(frameBuffer, readFrameSize);
+		handleNalus(naluUnits);
+	}
 }
 
 bool CRTMPStream::SendH264Frames(const char *pFrameDataDir) {
 	int framesSum = getFramesSum(pFrameDataDir);
 	string dirStr = pFrameDataDir;
 	string fileName;
-	const unsigned int frameBufferSize = 2 * 1024 * 1024;
+	unsigned int frameBufferSize = 2 * 1024 * 1024;
 	unsigned char* frameBuffer = new unsigned char[frameBufferSize]();
 	int readFrameSize = -1;
-	RTMPMetadata metaData;
-	int tick = 0;
 
 	for (int i = 0; i < framesSum; i++) {
-		fileName = dirStr + i;
-		cout << "Now read frame " << fileName << endl;
+		stringstream ss;
+		ss << dirStr << i;
+		ss >> fileName;
+//		fileName = dirStr + i;
+		// cout << "Now read frame " << fileName << endl;
 		if ((readFrameSize = getFrameData(fileName, frameBuffer, frameBufferSize)) > 0) {
-			if (i == 0) {
+			if (frameBuffer[4] == 103) {
 				// fetch SPS, PPS, SEI, IDR's imformation
-				vector<NaluUnit*> results = processFirstFrame(frameBuffer, readFrameSize);
-
-				for(int j=0;j<results.size();j++) {
-					switch(results[j]->type) {
-					// SPS
-					case 0x07: {
-						metaData.nSpsLen = results[j]->size;
-						memcpy(metaData.Sps, results[j]->data, results[j]->size);
-
-						int width = 0, height = 0;
-						h264_decode_sps(metaData.Sps, metaData.nSpsLen, width, height);
-						metaData.nWidth = width;
-						metaData.nHeight = height;
-						metaData.nFrameRate = 25;
-
-						break;
-					}
-
-					// PPS
-					case 0x08: {
-						metaData.nPpsLen = results[j]->size;
-						memcpy(metaData.Pps, results[j]->data, results[j]->size);
-						break;
-					}
-
-					// SEI
-					case 0x06: {
-						SendH264Packet(results[j]->data, results[j]->size, false, tick);
-						msleep(40);
-						tick += 40;	//40是由帧数决定的,25帧情况下:tick=1s/25=0.04s=40ms
-						break;
-					}
-
-					// IDR
-					case 0x05: {
-						SendH264Packet(results[j]->data, results[j]->size, true, tick);
-						msleep(40);
-						tick += 40;	//40是由帧数决定的,25帧情况下:tick=1s/25=0.04s=40ms
-						break;
-					}
-					default: {
-						printf("error: unknow frame type: %x\n", results[j]->type);
-					}
-					}
-
-					if(metaData.nSpsLen > 0 && metaData.nPpsLen > 0) {
-						if(j<2) {
-							printf("results index error: %d\n", j);
-						} else {
-							printf("results index normal: %d\n", j);
-						}
-						// 发送MetaData
-						SendMetadata(&metaData);
-					}
-				}
+				vector<NaluUnit*> naluUnits = processFirstFrame(frameBuffer, readFrameSize);
+				handleNalus(naluUnits);
 			} else {
 				// send normal frame
-				NaluUnit naluUnit = processNormalFrame(frameBuffer, readFrameSize);
-				bool isKeyFrame = (naluUnit.type == 0x05) ? true : false;
-				SendH264Packet(naluUnit.data, naluUnit.size, isKeyFrame, tick);
-				msleep(40);
-				tick += 40;	//40是由帧数决定的,25帧情况下:tick=1s/25=0.04s=40ms
+				vector<NaluUnit*> naluUnits = processNormalFrame(frameBuffer, readFrameSize);
+				handleNalus(naluUnits);
 			}
 		}
 
 	}
 
+	delete [] frameBuffer;
 	return TRUE;
-}
-
-bool CRTMPStream::SendH264File(const char *pFileName) {
-	m_nCurPos = 0;
-	if (pFileName == NULL) {
-		return FALSE;
-	}
-	FILE *fp = fopen(pFileName, "rb");
-	if (!fp) {
-		printf("ERROR:open file %s failed!", pFileName);
-	}
-	fseek(fp, 0, SEEK_SET);
-	m_nFileBufSize = fread(m_pFileBuf, sizeof(unsigned char), FILEBUFSIZE, fp);
-	if (m_nFileBufSize >= FILEBUFSIZE) {
-		printf("warning : File size is larger than BUFSIZE\n");
-	}
-	fclose(fp);
-
-	RTMPMetadata metaData;
-	memset(&metaData, 0, sizeof(RTMPMetadata));
-
-	int i = m_nCurPos;
-	while (i < m_nFileBufSize) {
-		if (m_pFileBuf[i] == 0x00 && m_pFileBuf[i + 1] == 0x00
-				&& m_pFileBuf[i + 2] == 0x00 && m_pFileBuf[i + 3] == 0x01
-				&& m_pFileBuf[i + 4] == 0x67) {
-			m_nCurPos = i;
-			break;
-		}
-		i++;
-	}
-
-	cout << "after 1st position: " << m_nCurPos << endl;
-
-	NaluUnit naluUnit;
-	// 读取SPS帧
-	ReadOneNaluFromBuf(naluUnit);
-	metaData.nSpsLen = naluUnit.size;
-	memcpy(metaData.Sps, naluUnit.data, naluUnit.size);
-
-	cout << "afer SPS position: " << m_nCurPos << endl;
-
-	// 读取PPS帧
-	ReadOneNaluFromBuf(naluUnit);
-	metaData.nPpsLen = naluUnit.size;
-	memcpy(metaData.Pps, naluUnit.data, naluUnit.size);
-
-	cout << "afer PPS position: " << m_nCurPos << endl;
-
-	// 解码SPS,获取视频图像宽、高信息
-	int width = 0, height = 0;
-	h264_decode_sps(metaData.Sps, metaData.nSpsLen, width, height);
-	metaData.nWidth = width;
-	metaData.nHeight = height;
-	metaData.nFrameRate = 25;
-
-	// 发送MetaData
-	SendMetadata(&metaData);
-
-	unsigned int tick = 0;
-	while (ReadOneNaluFromBuf(naluUnit)) {
-		bool bKeyframe = (naluUnit.type == 0x05) ? TRUE : FALSE;
-		// 发送H264数据帧
-		SendH264Packet(naluUnit.data, naluUnit.size, bKeyframe, tick);
-		msleep(40);
-		tick += 40;	//40是由帧数决定的,25帧情况下:tick=1s/25=0.04s=40ms
-	}
-
-	return TRUE;
-}
-
-bool CRTMPStream::ReadOneNaluFromBuf(NaluUnit &nalu) {
-	int i = m_nCurPos;
-	while (i < m_nFileBufSize) {
-		if (m_pFileBuf[i++] == 0x00 && m_pFileBuf[i++] == 0x00
-				&& m_pFileBuf[i++] == 0x00 && m_pFileBuf[i++] == 0x01) {
-			int pos = i;
-			while (pos < m_nFileBufSize) {
-				if (m_pFileBuf[pos++] == 0x00 && m_pFileBuf[pos++] == 0x00
-						&& m_pFileBuf[pos++] == 0x00
-						&& m_pFileBuf[pos++] == 0x01) {
-					break;
-				}
-			}
-			if (pos == m_nFileBufSize) {
-				nalu.size = pos - i;
-			} else {
-				nalu.size = (pos - 4) - i;
-			}
-			cout << "frame size: " << nalu.size << endl;
-
-			nalu.type = m_pFileBuf[i] & 0x1f;
-			nalu.data = &m_pFileBuf[i];
-
-			m_nCurPos = pos - 4;
-			return TRUE;
-		}
-	}
-	return FALSE;
 }

@@ -38,19 +38,19 @@ endif
 # Add inputs and outputs from these tool invocations to the build variables 
 
 # All Target
-all: H264RtmpStreamer
+all: libH264RtmpStreamer.so
 
 # Tool invocations
-H264RtmpStreamer: $(OBJS) $(USER_OBJS)
+libH264RtmpStreamer.so: $(OBJS) $(USER_OBJS)
 	@echo 'Building target: $@'
 	@echo 'Invoking: GCC C++ Linker'
-	g++ -L/usr/local/lib -o "H264RtmpStreamer" $(OBJS) $(USER_OBJS) $(LIBS)
+	g++ -L/usr/local/lib -L/usr/lib64 -shared -o "libH264RtmpStreamer.so" $(OBJS) $(USER_OBJS) $(LIBS)
 	@echo 'Finished building target: $@'
 	@echo ' '
 
 # Other Targets
 clean:
-	-$(RM) $(CC_DEPS)$(C++_DEPS)$(EXECUTABLES)$(C_UPPER_DEPS)$(CXX_DEPS)$(OBJS)$(CPP_DEPS)$(C_DEPS) H264RtmpStreamer
+	-$(RM) $(LIBRARIES)$(CC_DEPS)$(C++_DEPS)$(C_UPPER_DEPS)$(CXX_DEPS)$(OBJS)$(CPP_DEPS)$(C_DEPS) libH264RtmpStreamer.so
 	-@echo ' '
 
 .PHONY: all clean dependents
