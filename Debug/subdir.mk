@@ -7,19 +7,19 @@ CPP_SRCS += \
 ../Main.cpp \
 ../RTMPStream.cpp \
 ../convert_utils.cpp \
-../nl_tno_stormcv_util_StreamerHelper.cpp 
+../edu_fudan_stormcv_util_StreamerHelper.cpp 
 
 OBJS += \
 ./Main.o \
 ./RTMPStream.o \
 ./convert_utils.o \
-./nl_tno_stormcv_util_StreamerHelper.o 
+./edu_fudan_stormcv_util_StreamerHelper.o 
 
 CPP_DEPS += \
 ./Main.d \
 ./RTMPStream.d \
 ./convert_utils.d \
-./nl_tno_stormcv_util_StreamerHelper.d 
+./edu_fudan_stormcv_util_StreamerHelper.d 
 
 
 # Each subdirectory must supply rules for building sources it contributes
